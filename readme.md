@@ -4,7 +4,7 @@
 
 ## System Architecture
 
-![System Overview](https://github.com/bredeespelid/gcp_autotagger/blob/main/info/visuals.png?raw=true)
+![System Overview](https://github.com/bredeespelid/gcp_autotagger/blob/main/info/info.png?raw=true)
 
 The repository is organized as follows:
 
