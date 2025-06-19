@@ -39,67 +39,45 @@ The repository is organized as follows:
 
 ```
 
-This project implements an advanced system for automatically "tagging" (cataloging) Google Cloud Storage (GCS) resources (buckets and objects) into a central BigQuery table. The system utilizes path-based hashes for unique identification and tracks various metadata and properties.
 
-## Architectural Overview
+The system catalogs GCS buckets and objects into BigQuery using SHA256-based hashes. It updates metadata based on Pub/Sub triggers and scheduled jobs.
 
-The system consists of several Cloud Functions working in concert, orchestrated by Cloud Scheduler and Pub/Sub-based event triggers:
+## Cloud Functions
 
-1.  **Orchestrator Function (`orchestrator_function`):**
-    *   **Trigger:** Pub/Sub message from a Cloud Logging Sink (filtered for `storage.buckets.create` events).
-    *   **Responsibilities:**
-        *   When a new GCS bucket is created, this function patches the bucket with default labels (e.g., `createdby`, `createdon`, `managed-by`).
-        *   Creates an initial record for the new bucket in the BigQuery catalog via streaming insert (`insert_rows_json`).
+### Orchestrator
+- Triggered by `bucket.create` events (Logging → Pub/Sub)
+- Applies default labels to the new bucket
+- Inserts bucket metadata into BigQuery
 
-2.  **Batch Worker Function (`batch_worker_function`):**
-    *   **Trigger:** Cloud Scheduler (e.g., every 30 minutes (or 6h or 12, 24?). Runs as an HTTP-triggered function.
-    *   **Responsibilities ("InsertOnlyV1"):**
-        *   Scans all GCS buckets tagged as "managed".
-        *   Identifies new buckets not present in the BigQuery catalog and adds them via streaming insert.
-        *   Identifies new objects within "managed" buckets not present in the BigQuery catalog and adds them via streaming insert.
-        *   Patches GCS objects with standardized metadata (including a path-based hash and a marker indicating they have been processed).
-        *   Updates a label on the GCS bucket (`autotagger-last-scanned-utc`) to indicate the last quick scan time.
-    *   **Important:** This function does *not* perform DML `UPDATE` operations on existing BigQuery records to avoid conflicts with BigQuery's streaming buffer.
+### Batch Worker
+- Triggered by Cloud Scheduler
+- Scans all managed buckets
+- Adds new buckets/objects to BigQuery
+- Patches object metadata
+- Sets `autotagger-last-scanned-utc` label
 
-3.  **Full Reconciliation Worker Function (`full_reconciliation_worker_function`):**
-    *   **Trigger:** Cloud Scheduler (e.g., every 1 (or 4-6-12-24?) hours, significantly less frequent than the Batch Worker). Runs as an HTTP-triggered function.
-    *   **Responsibilities ("DML Updates"):**
-        *   Scans all GCS buckets tagged as "managed".
-        *   Compares metadata and properties of existing buckets in GCS against the BigQuery catalog and performs DML `UPDATE` operations if discrepancies are found.
-        *   Compares metadata and properties of existing objects in GCS against the BigQuery catalog and performs DML `UPDATE` operations if discrepancies are found.
-        *   Identifies objects present in the BigQuery catalog (with status `ACTIVE`) but no longer existing in GCS, and performs DML `UPDATE` operations to set their status to `DELETED`.
-        *   Updates a label on the GCS bucket (`autotagger-last-reconciled-utc`) to indicate the last full reconciliation time.
+### Reconciliation Worker
+- Triggered by Cloud Scheduler (less frequent)
+- Compares GCS vs. BigQuery state
+- Updates or marks deleted records via DML
+- Sets `autotagger-last-reconciled-utc` label
 
-4.  **Status Updater Function (`status_updater_function`):**
-    *   **Trigger:** Pub/Sub message from a Cloud Logging Sink (filtered for `storage.objects.delete` and `storage.buckets.delete` events).
-    *   **Responsibilities:**
-        *   When a GCS object or bucket is deleted, this function uses a `MERGE` statement in BigQuery.
-        *   If the record exists, its status is updated to `DELETED`.
-        *   If the record does *not* exist (e.g., an object deleted before the `batch_worker` could catalog it), a new record is created with status `DELETED` to ensure the deletion is registered.
+### Status Updater
+- Triggered by `object.delete` and `bucket.delete` events
+- Uses `MERGE` to mark records as `DELETED` in BigQuery
+- Creates a `DELETED` record if it didn’t exist before
 
-## Important Note on GCS Bucket Interaction & Storage Classes
+## Cold Storage Considerations
 
-**Manual interaction with GCS objects (e.g., downloading, viewing metadata through the console, or direct API GET requests) for buckets utilizing "cold" storage classes like `ARCHIVE` or `COLDLINE` can incur significant costs and potentially move objects to hotter, more expensive storage tiers.**
+Avoid manual access to buckets with `ARCHIVE` or `COLDLINE` classes. This system only fetches metadata (`list_blobs`, `blob.reload()`), which is low-cost. Accessing content may incur retrieval or early deletion fees.
 
-*   **Avoid Manual File Access in Cold Storage:** If a bucket is intended for long-term archival (`ARCHIVE` storage class), direct access to its objects should be minimized or avoided unless a data retrieval operation is explicitly intended. Operations like listing objects are generally low-cost, but accessing object content or metadata can trigger retrieval fees and early deletion fees if objects are moved from cold storage prematurely.
-*   **Automated System Design:** This auto-tagger system is designed to primarily interact with object *metadata* for cataloging purposes. The `batch_worker` and `full_reconciliation_worker` perform `list_blobs` and `blob.reload()` (which fetches metadata). These operations are generally inexpensive even on colder tiers.
-*   **Cost Implications:** Be mindful of the storage class of your buckets. Frequent, automated metadata reads are typically fine, but any workflow (manual or automated) that frequently *retrieves object data* from cold tiers will lead to higher costs. This system itself does not download object content.
+## Terraform Components
 
-**The principle is: Let the automated system manage the cataloging. Avoid manual operations on objects in managed buckets, especially if they are in cold storage, to prevent unintended cost or storage class transitions.**
-
-## Key Infrastructure Components (defined in Terraform)
-
-*   **Google BigQuery Dataset & Table:**
-    *   Dataset: `data_asset_catalog`
-    *   Table: `gcs_hash_inventory` (partitioned on `last_updated_utc`, clustered on `item_type`, `gcs_path`)
-*   **Google Cloud Functions (Gen 2):** One for each of the above functions, each with its own Service Account.
-*   **Google Cloud Scheduler:** Two jobs to trigger the `batch_worker_function` (frequently) and the `full_reconciliation_worker_function` (less frequently).
-*   **Google Pub/Sub Topic:** `gcs-autotagger-lifecycle-events` to receive messages from the logging sink.
-*   **Google Cloud Logging Sink:** Filters relevant GCS audit logs and sends them to the Pub/Sub topic.
-*   **IAM Roles and Permissions:** Carefully defined for each Service Account to adhere to the principle of least privilege (as practically as possible).
-*   **GCS Bucket for Source Code:** A central bucket (`<project_id>-gcf-autotagger-src`) to store the zipped function code archives.
-
-
+- BigQuery: `data_asset_catalog.gcs_hash_inventory`
+- Cloud Scheduler jobs for batch and reconciliation
+- Pub/Sub + Logging Sink for event flow
+- Cloud Functions (Gen 2), one per component
+- IAM roles scoped per function
 ## BigQuery Catalog Data Example
 
 The `gcs_hash_inventory` table in BigQuery stores detailed information about cataloged GCS buckets and objects. Here's an example of what some key fields in a few records might look like:
