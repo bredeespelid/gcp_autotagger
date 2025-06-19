@@ -2,10 +2,9 @@
 
 ## Project Structure
 
-Simplified explenation
+## System Architecture
 
-
-
+![System Overview](https://github.com/bredeespelid/tgs_gcp_autotagger/blob/main/simplified_explenation.png?raw=true)
 
 The repository is organized as follows:
 
