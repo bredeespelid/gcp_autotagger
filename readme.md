@@ -58,7 +58,7 @@ The system consists of several Cloud Functions working in concert, orchestrated 
     *   **Important:** This function does *not* perform DML `UPDATE` operations on existing BigQuery records to avoid conflicts with BigQuery's streaming buffer.
 
 3.  **Full Reconciliation Worker Function (`full_reconciliation_worker_function`):**
-    *   **Trigger:** Cloud Scheduler (e.g., every 1-4-6-12-24 hours, significantly less frequent than the Batch Worker). Runs as an HTTP-triggered function.
+    *   **Trigger:** Cloud Scheduler (e.g., every 1 (or 4-6-12-24?) hours, significantly less frequent than the Batch Worker). Runs as an HTTP-triggered function.
     *   **Responsibilities ("DML Updates"):**
         *   Scans all GCS buckets tagged as "managed".
         *   Compares metadata and properties of existing buckets in GCS against the BigQuery catalog and performs DML `UPDATE` operations if discrepancies are found.
