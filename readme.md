@@ -2,6 +2,11 @@
 
 ## Project Structure
 
+Simplified explenation
+
+
+
+
 The repository is organized as follows:
 
 ```text
