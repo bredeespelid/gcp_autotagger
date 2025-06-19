@@ -48,7 +48,7 @@ The system consists of several Cloud Functions working in concert, orchestrated 
         *   Creates an initial record for the new bucket in the BigQuery catalog via streaming insert (`insert_rows_json`).
 
 2.  **Batch Worker Function (`batch_worker_function`):**
-    *   **Trigger:** Cloud Scheduler (e.g., every 30 minutes). Runs as an HTTP-triggered function.
+    *   **Trigger:** Cloud Scheduler (e.g., every 30 minutes (or 6h or 12, 24?). Runs as an HTTP-triggered function.
     *   **Responsibilities ("InsertOnlyV1"):**
         *   Scans all GCS buckets tagged as "managed".
         *   Identifies new buckets not present in the BigQuery catalog and adds them via streaming insert.
@@ -58,7 +58,7 @@ The system consists of several Cloud Functions working in concert, orchestrated 
     *   **Important:** This function does *not* perform DML `UPDATE` operations on existing BigQuery records to avoid conflicts with BigQuery's streaming buffer.
 
 3.  **Full Reconciliation Worker Function (`full_reconciliation_worker_function`):**
-    *   **Trigger:** Cloud Scheduler (e.g., every 1-4 hours, significantly less frequent than the Batch Worker). Runs as an HTTP-triggered function.
+    *   **Trigger:** Cloud Scheduler (e.g., every 1-4-6-12-24 hours, significantly less frequent than the Batch Worker). Runs as an HTTP-triggered function.
     *   **Responsibilities ("DML Updates"):**
         *   Scans all GCS buckets tagged as "managed".
         *   Compares metadata and properties of existing buckets in GCS against the BigQuery catalog and performs DML `UPDATE` operations if discrepancies are found.
