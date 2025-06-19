@@ -108,12 +108,13 @@ The `gcs_hash_inventory` table in BigQuery stores detailed information about cat
 | `gs://new_update/TTI.00001624.sgy`                                          | OBJECT    | ACTIVE | `41d47ec6...988b554d74`                                     | `.sgy`      | `2256760`       | `2025-06-19 12:13:37 UTC` | `2025-06-19 12:55:01 UTC` | `{"data-source":"gcs-autotagger-upload", ...}`   | `{"md5_hash_gcs":"+JLqLId1IuNz...", ...}`       |
 | `gs://some-bucket/some-deleted-object.txt`                                  | OBJECT    | DELETED| `(hash_value_of_deleted_object)`                          | `.txt`      | `(size_before_delete)`| `(creation_time)`         | `(deletion_scan_time)`    | `(metadata_before_delete_or_null)`             | `(details_before_delete_or_null)`              |
 
+# Accessing Catalog Data in Microsoft Fabric (Example)
 
-Accessing Catalog Data in Microsoft Fabric (Example)
+This example demonstrates how to connect to BigQuery via Microsoft Fabric Notebooks, extract data, and write it to Delta Lake format. It also includes logic for incremental refresh using an `update_time` column.
 
-
+```python
 # STEP 1: (In Fabric Notebook) Ensure Spark session is available
-# spark = SparkSession.builder.appName("GCS_Inventory_Ingest").getOrCreate() # Usually pre-configured
+# spark = SparkSession.builder.appName("GCS_Inventory_Ingest").getOrCreate()  # Usually pre-configured
 
 # STEP 2: Read GCP service account key from Lakehouse Files
 # Assumes the key file 'bq-fabric-key.json' is in the 'Files' root of your Lakehouse
@@ -124,45 +125,53 @@ key_dict = df_key.toPandas().iloc[0].to_dict()
 from google.cloud import bigquery
 from google.oauth2 import service_account
 import pandas as pd
+from datetime import datetime
+from pyspark.sql.functions import col, max as spark_max
 
 # STEP 4: Create BigQuery client
 credentials = service_account.Credentials.from_service_account_info(key_dict)
 client = bigquery.Client(credentials=credentials, project=key_dict["project_id"])
 
-# STEP 5: Define the SQL query to fetch data from BigQuery
-# Replace 'sandbox-gcp-tags' with your actual GCP project ID if different
-# Replace 'data_asset_catalog.gcs_hash_inventory' with your actual dataset and table if different
-query = """
-SELECT 
-    *
-FROM `sandbox-gcp-tags.data_asset_catalog.gcs_hash_inventory`
-"""
+# STEP 5: Get latest update_time from existing Delta Table (for incremental logic)
+try:
+    latest_ts = spark.read.table("gcs_hash_inventory_delta").agg(spark_max("update_time")).collect()[0][0]
+    latest_ts_str = latest_ts.strftime("%Y-%m-%d %H:%M:%S")
+    print(f"Latest update_time found: {latest_ts_str}")
+except:
+    latest_ts_str = None
+    print("No existing Delta table found or empty. Performing full load.")
 
-# STEP 6: Execute query and load data into a pandas DataFrame
-# For very large tables, consider using the BigQuery Storage API for better performance
-# or processing in batches.
+# STEP 6: Define SQL query
+if latest_ts_str:
+    query = f"""
+    SELECT *
+    FROM `sandbox-gcp-tags.data_asset_catalog.gcs_hash_inventory`
+    WHERE update_time > TIMESTAMP('{latest_ts_str}')
+    """
+else:
+    query = """
+    SELECT *
+    FROM `sandbox-gcp-tags.data_asset_catalog.gcs_hash_inventory`
+    """
+
+# STEP 7: Execute query and load data into a pandas DataFrame
 df_bq_pandas = client.query(query).to_dataframe()
 
-# STEP 7: Convert JSON-like string columns (if BigQuery client returns them as objects)
-# The BigQuery client library usually parses JSON columns correctly.
-# However, if they end up as Python dicts/lists in pandas and need to be strings for Spark:
+# STEP 8: (Optional) Convert nested fields to strings if needed
 # json_cols_to_stringify = ["gcs_metadata", "gcp_resource_details"]
 # for col in json_cols_to_stringify:
 #     if col in df_bq_pandas.columns:
 #         df_bq_pandas[col] = df_bq_pandas[col].apply(lambda x: json.dumps(x) if x is not None else None)
 
-# STEP 8: Convert pandas DataFrame to Spark DataFrame
+# STEP 9: Convert pandas DataFrame to Spark DataFrame
 df_spark = spark.createDataFrame(df_bq_pandas)
 
-# STEP 9: Write Spark DataFrame to a Delta Table in Lakehouse (initial load)
-# Replace 'gcs_hash_inventory_delta' with your desired Delta table name
-# For subsequent updates, you would typically use .mode("append") or implement MERGE logic.
-df_spark.write.format("delta").mode("overwrite").saveAsTable("gcs_hash_inventory_delta")
-# Or to a specific path:
-# df_spark.write.format("delta").mode("overwrite").save("Tables/gcs_hash_inventory_delta")
+# STEP 10: Write data to Delta Table (append for incremental, overwrite for full load)
+if latest_ts_str:
+    df_spark.write.format("delta").mode("append").saveAsTable("gcs_hash_inventory_delta")
+else:
+    df_spark.write.format("delta").mode("overwrite").saveAsTable("gcs_hash_inventory_delta")
 
-
-# (Optional) STEP 10: Verify by displaying the content of the new Delta Table
+# STEP 11: Verify by reading from Delta Table
 display(spark.read.table("gcs_hash_inventory_delta"))
-# Or if saved to a path:
-# display(spark.read.format("delta").load("Tables/gcs_hash_inventory_delta"))
+```
