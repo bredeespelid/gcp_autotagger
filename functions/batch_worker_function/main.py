@@ -22,9 +22,11 @@ LAST_SCANNED_LABEL_KEY = os.environ.get('LAST_SCANNED_LABEL_KEY', "autotagger-la
 HASH_ALGO_METADATA_KEY = os.environ.get('HASH_ALGO_METADATA_KEY', 'autotagger_hash_algorithm')
 HASH_VALUE_METADATA_KEY = os.environ.get('HASH_VALUE_METADATA_KEY', 'autotagger_hash_value')
 
-# Hentes fra miljøvariabel satt i Terraform (f.eks. "PATH_BASED_SHA256")
+# Retrieved from environment variable set in Terraform (e.g., "PATH_BASED_SHA256")
+
 PATH_HASH_ALGORITHM_NAME_FOR_OBJECTS = os.environ.get('PATH_HASH_ALGORITHM', "PATH_BASED_SHA256")
-# Fast konstant for bucket-stier/navn
+
+# Fixed constant for bucket paths/names
 BUCKET_PATH_HASH_ALGORITHM_NAME = "BUCKET_PATH_SHA256"
 
 try:
@@ -34,28 +36,87 @@ except json.JSONDecodeError:
     DEFAULT_OBJECT_METADATA = {}
 
 def _generate_sha256_hash(input_string: str) -> str:
+    """
+    Generate a SHA-256 hash for the given input string.
+
+    Args:
+        input_string (str): The string to be hashed.
+
+    Returns:
+        str: The resulting SHA-256 hexadecimal digest.
+    """
     hasher = hashlib.sha256()
     hasher.update(input_string.encode('utf-8'))
     return hasher.hexdigest()
 
 def _sanitize_metadata_value(value):
+    """
+    Convert a value to a string, replacing None with an empty string.
+
+    Args:
+        value: The input value to sanitize.
+
+    Returns:
+        str: The value as a string, or an empty string if the value is None.
+    """
     return str(value) if value is not None else ""
 
 def _get_file_format(blob_name_with_path: str):
+    """
+    Extract the file extension from a blob or file path.
+
+    Args:
+        blob_name_with_path (str): The full path or name of the file/blob.
+
+    Returns:
+        str or None: The file extension in lowercase (including the dot), or None if not available.
+    """
     if not blob_name_with_path: return None
     file_name = pathlib.Path(blob_name_with_path).name
     suffix = pathlib.Path(file_name).suffix
     return suffix.lower() if suffix else None
 
+
 def _safe_getattr(obj, attr, default=None):
-    """Hjelpefunksjon for å trygt hente attributter."""
+    """
+    Safely retrieve an attribute from an object.
+
+    Args:
+        obj: The object from which to retrieve the attribute.
+        attr (str): The name of the attribute to access.
+        default: The value to return if the attribute is not found. Defaults to None.
+
+    Returns:
+        Any: The value of the attribute if it exists, otherwise the default value.
+    """
     return getattr(obj, attr, default)
 
+
 def _safe_isoformat(dt_obj):
-    """Hjelpefunksjon for trygg ISO-formatering av datetime-objekter."""
+    """
+    Safely convert a datetime object to ISO 8601 string format.
+
+    Args:
+        dt_obj (datetime or None): A datetime object to be formatted.
+
+    Returns:
+        str or None: The ISO 8601 formatted string if input is a datetime object, otherwise None.
+    """
     return dt_obj.isoformat() if dt_obj else None
 
+
 def _collect_gcp_resource_details_for_bucket(gcs_bucket_obj, actual_gcs_labels):
+    """
+    Collect metadata and configuration details from a GCS bucket object.
+
+    Args:
+        gcs_bucket_obj: The Google Cloud Storage bucket object from which to extract metadata.
+        actual_gcs_labels (dict or None): A dictionary of labels associated with the bucket.
+
+    Returns:
+        dict: A dictionary containing relevant bucket details such as creation time, storage class,
+              versioning, IAM configuration, encryption settings, and labels.
+    """
     iam_config = _safe_getattr(gcs_bucket_obj, 'iam_configuration')
     details = {
         "gcs_time_created_raw": str(_safe_getattr(gcs_bucket_obj, 'time_created')),
@@ -74,7 +135,18 @@ def _collect_gcp_resource_details_for_bucket(gcs_bucket_obj, actual_gcs_labels):
     }
     return details
 
+
 def _collect_gcp_resource_details_for_object(gcs_blob_obj):
+    """
+    Collect metadata and configuration details from a GCS blob (object).
+
+    Args:
+        gcs_blob_obj: The Google Cloud Storage blob object from which to extract metadata.
+
+    Returns:
+        dict: A dictionary containing details such as timestamps, generation metadata, checksums,
+              encryption configuration, hold statuses, and retention expiration.
+    """
     cust_enc = _safe_getattr(gcs_blob_obj, 'customer_encryption')
     retention_exp_time = _safe_getattr(gcs_blob_obj, 'retention_expiration_time')
     details = {
@@ -92,11 +164,31 @@ def _collect_gcp_resource_details_for_object(gcs_blob_obj):
     }
     return details
 
-# _build_scalar_query_parameters is NOT needed in this InsertOnlyV1 version of batch_worker
-# as it does not run DML queries that require typed parameters.
 
 @functions_framework.http
 def main_batch_handler(request):
+
+    """
+    HTTP-triggered Cloud Function that performs batch metadata extraction, deduplication,
+    and insert operations for GCS buckets and objects into BigQuery.
+
+    The function:
+    - Iterates over all GCS buckets in the configured project.
+    - Filters buckets by label to determine managed buckets.
+    - Checks whether bucket and object paths already exist in BigQuery.
+    - Extracts metadata and formats it into structured JSON rows.
+    - Applies GCS metadata patching (with hash tagging and audit timestamp).
+    - Inserts new rows into BigQuery if they are not already present.
+    - Updates a scanning timestamp label on each scanned bucket.
+
+    Args:
+        request (flask.Request): The HTTP request object. The content is unused.
+
+    Returns:
+        Tuple[str, int]: A tuple containing a status message and HTTP status code.
+                         Returns HTTP 200 on success, or 500 on error or configuration failure.
+    """
+    
     run_dt_utc = datetime.now(timezone.utc)
     run_ts_iso = run_dt_utc.isoformat()
     run_ts_label = run_dt_utc.strftime("%Y%m%d%H%M%S")
@@ -131,8 +223,9 @@ def main_batch_handler(request):
             bq_rows_to_insert_this_iteration = []
             bucket_gcs_path = f"gs://{bucket_name}"
 
-            # --- 1. Prosesser BUCKET (Insert hvis ny) ---
-            # Sjekk om bucket allerede finnes i BQ
+            # --- 1. Process BUCKET (Insert if new) ---
+            # Check if bucket already exists in BQ
+
             query_bucket_bq_exists = f"SELECT gcs_path FROM `{bq_table_id_full}` WHERE gcs_path = @path_b_check AND item_type = 'BUCKET' LIMIT 1"
             params_b_check_exists = [bigquery.ScalarQueryParameter("path_b_check", "STRING", bucket_gcs_path)]
             bucket_bq_exists = False
@@ -172,8 +265,9 @@ def main_batch_handler(request):
                  logger.warning(f"BatchWorker: Kunne ikke verifisere om bucket {bucket_gcs_path} eksisterer i BQ pga feil. Hopper over potensiell insert.")
 
 
-            # --- 2. Håndter individuelle OBJEKTER (Insert hvis nye, GCS patch) ---
-            # Hent alle eksisterende objektstier i BQ for denne bucket for å unngå SELECT per objekt
+            # --- 2. Handle individual OBJECTS (Insert if new, GCS patch) ---
+            # Retrieve all existing object paths in BQ for this bucket to avoid SELECT per object
+
             existing_bq_object_paths = set()
             e_select_existing_obj_occurred = False
             try:
@@ -190,7 +284,7 @@ def main_batch_handler(request):
             for blob in storage_client.list_blobs(bucket_name):
                 full_gcs_path = f"gs://{bucket_name}/{blob.name}"
                 try:
-                    # GCS Metadata Patching (forblir likt)
+                    # GCS Metadata Patching
                     blob.reload()
                     object_path_hash_algo_for_bq = PATH_HASH_ALGORITHM_NAME_FOR_OBJECTS
                     object_path_hash_value_for_bq = _generate_sha256_hash(full_gcs_path)
@@ -212,7 +306,7 @@ def main_batch_handler(request):
                         except PreconditionFailed: logger.warning(f"BatchWorker: GCS Patch Precondition Failed for {full_gcs_path}. Fortsetter til BQ-logikk.");
                         except Exception as e_patch: logger.error(f"BatchWorker: Feil ved GCS patch for {full_gcs_path}: {e_patch}. Fortsetter til BQ-logikk.")
 
-                    # Sjekk om objektet finnes i BQ
+                    # Check if the object exists in BQ
                     obj_bq_exists_current_blob = False
                     if not e_select_existing_obj_occurred: # Bruk pre-hentet sett hvis det var vellykket
                         obj_bq_exists_current_blob = full_gcs_path in existing_bq_object_paths
@@ -277,7 +371,7 @@ def main_batch_handler(request):
                     error_details = getattr(e_insert_json, 'errors', None)
                     logger.error(f"BatchWorker: Kritisk feil under insert_rows_json for {bucket_name}: {e_insert_json}. Details: {error_details}", exc_info=True)
 
-            # Oppdater GCS bucket label for denne raske skanningen
+            # Update GCS bucket label for this quick scan
             try:
                 if bucket_gcs_obj.labels is None: bucket_gcs_obj.labels = {}
                 bucket_gcs_obj.labels[LAST_SCANNED_LABEL_KEY] = run_ts_label
