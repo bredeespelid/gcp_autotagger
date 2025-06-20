@@ -16,6 +16,17 @@ BIGQUERY_DATASET_ID = os.environ.get('BIGQUERY_DATASET_ID')
 BIGQUERY_TABLE_ID = os.environ.get('BIGQUERY_TABLE_ID')
 
 def _get_file_format_from_path_for_status_updater(gcs_path_str):
+
+    """
+    Extracts the file extension from a GCS object path.
+
+    Args:
+        gcs_path_str (str): The full GCS path string (e.g., "gs://bucket/file.csv").
+
+    Returns:
+        str or None: The file extension in lowercase (including the dot), or None if not found.
+    """
+    
     if not gcs_path_str: return None
     file_name_match = re.search(r'[^/]+$', gcs_path_str)
     if not file_name_match: return None
@@ -25,7 +36,23 @@ def _get_file_format_from_path_for_status_updater(gcs_path_str):
 
 @functions_framework.cloud_event
 def main_handler(event):
-    # ... (som før)
+
+    """
+    CloudEvent-triggered function that listens for GCS delete operations via Audit Logs.
+
+    The function:
+    - Parses the event payload and extracts the GCS resource path.
+    - Determines whether the deleted resource is a bucket or object.
+    - Triggers a BigQuery MERGE operation to mark the resource as 'DELETED',
+      or inserts it if it was not previously tracked.
+
+    Args:
+        event (CloudEvent): The event containing the base64-encoded log message.
+
+    Returns:
+        None
+    """
+    
     if not all([PROJECT_ID, BIGQUERY_DATASET_ID, BIGQUERY_TABLE_ID]): logger.critical("StatusUpdater: BQ env vars mangler."); return
     try:
         log_entry_str = base64.b64decode(event.data['message']['data']).decode('utf-8'); log_entry = json.loads(log_entry_str)
@@ -39,6 +66,20 @@ def main_handler(event):
 
 
 def update_status_in_bigquery(gcs_path):
+    
+    """
+    Updates the status of a GCS resource in BigQuery to 'DELETED', or inserts a new entry if it does not exist.
+
+    This function performs a `MERGE` operation based on the GCS path. If a row exists,
+    it updates the `status` and `last_updated_utc` fields. If not, it inserts a new row with minimal metadata.
+
+    Args:
+        gcs_path (str): The full GCS path of the resource (e.g., "gs://bucket" or "gs://bucket/file.txt").
+
+    Returns:
+        None
+    """
+    
     bq_client = bigquery.Client(project=PROJECT_ID)
     table_id_full = f"{PROJECT_ID}.{BIGQUERY_DATASET_ID}.{BIGQUERY_TABLE_ID}"
     
