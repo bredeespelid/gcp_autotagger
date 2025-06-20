@@ -26,11 +26,34 @@ except json.JSONDecodeError:
 HASHING_ALGORITHMS = ['sha256', 'sha512', 'md5'] 
 
 def _get_deterministic_hash_algorithm(gcs_path): # For bucket hash
+
+    """
+    Select a deterministic hashing algorithm from a predefined list, based on the SHA-1 hash of the GCS path.
+
+    This ensures consistent hash algorithm assignment for a given bucket across executions.
+
+    Args:
+        gcs_path (str): The full GCS path (e.g., "gs://bucket-name").
+
+    Returns:
+        str: The name of the selected hash algorithm.
+    """
+    
     path_hash = hashlib.sha1(gcs_path.encode('utf-8')).digest()
     path_as_int = int.from_bytes(path_hash, 'big')
     return HASHING_ALGORITHMS[path_as_int % len(HASHING_ALGORITHMS)]
 
 def _write_to_bigquery(bq_client, row_to_insert):
+    """
+    Writes a single row of metadata to BigQuery.
+
+    Args:
+        bq_client (bigquery.Client): An initialized BigQuery client.
+        row_to_insert (dict): The row to be inserted into the table.
+
+    Returns:
+        None
+    """
     if not all([PROJECT_ID, BIGQUERY_DATASET_ID, BIGQUERY_TABLE_ID]):
         logger.error("Orchestrator: BigQuery miljøvariabler er ikke satt.")
         return
@@ -40,6 +63,18 @@ def _write_to_bigquery(bq_client, row_to_insert):
     else: logger.info(f"Orchestrator: Skrev {row_to_insert['item_type']} rad for {row_to_insert['gcs_path']} til BQ.")
 
 def _sanitize_label_value(value_str, max_length=63):
+    """
+    Sanitizes a string for use as a GCS label value.
+
+    Converts to lowercase, removes invalid characters, and trims to max allowed length.
+
+    Args:
+        value_str (str): The original label value.
+        max_length (int): Maximum length of the sanitized string. Defaults to 63.
+
+    Returns:
+        str: A valid, lowercase, sanitized GCS label string.
+    """
     if value_str is None: return ""
     s = str(value_str).lower()
     s = re.sub(r'[^a-z0-9_-]', '', s)
@@ -47,7 +82,22 @@ def _sanitize_label_value(value_str, max_length=63):
 
 @functions_framework.cloud_event
 def main_handler(event):
-    # ... (som før)
+
+    """
+    CloudEvent-triggered function that listens for GCS bucket creation events via Audit Logs.
+
+    When a bucket is created, this handler extracts metadata from the log event,
+    validates the bucket name, and triggers post-creation processing including
+    label assignment and BigQuery registration.
+
+    Args:
+        event (CloudEvent): The event payload containing encoded log data and metadata.
+
+    Returns:
+        None
+    """
+
+    
     if not PROJECT_ID: logger.critical("Orchestrator: GCP_PROJECT mangler."); return
     try:
         log_entry_str = base64.b64decode(event.data['message']['data']).decode('utf-8'); log_entry = json.loads(log_entry_str)
@@ -61,6 +111,25 @@ def main_handler(event):
 
 
 def handle_bucket_create(bucket_name, log_entry):
+
+        """
+    Handles metadata registration and label assignment for a newly created GCS bucket.
+
+    The function:
+    - Retrieves the bucket object using the Cloud Storage API.
+    - Applies default and derived labels to the bucket.
+    - Assembles relevant metadata including IAM, encryption, and retention settings.
+    - Computes a deterministic hash of the bucket name.
+    - Prepares a structured record and inserts it into a BigQuery table.
+
+    Args:
+        bucket_name (str): The name of the newly created GCS bucket.
+        log_entry (dict): The parsed log entry containing contextual information like creator identity and timestamp.
+
+    Returns:
+        None
+    """
+    
     logger.info(f"Orchestrator: Behandler opprettelse av bucket '{bucket_name}'.")
     storage_client = storage.Client(project=PROJECT_ID)
     bq_client = bigquery.Client(project=PROJECT_ID)
