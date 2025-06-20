@@ -1,4 +1,4 @@
-# GCP Auto-Tagger
+# GCP Metadata-Tagger
 
 ## Project Structure
 
