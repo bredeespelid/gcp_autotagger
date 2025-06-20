@@ -39,6 +39,7 @@ The repository is organized as follows:
 
 ```
 
+FYI -> Update coming for all resources https://github.com/bredeespelid/gcp_finops-cataloger
 
 The system catalogs GCS buckets and objects into BigQuery using SHA256-based hashes. It updates metadata based on Pub/Sub triggers and scheduled jobs.
 
