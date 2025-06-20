@@ -1,11 +1,11 @@
 # GCP Metadata-Tagger
 
-## Project Structure
-
 ## System Architecture
 
 ![System Overview](https://github.com/bredeespelid/gcp_autotagger/blob/main/info/info.png?raw=true)
 
+
+## Project Structure
 The repository is organized as follows:
 
 ```text
