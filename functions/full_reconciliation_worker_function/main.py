@@ -6,7 +6,7 @@ from datetime import datetime, timezone, timedelta # timedelta brukes for sammen
 import pathlib
 
 from google.cloud import storage, bigquery
-from google.cloud.exceptions import NotFound, PreconditionFailed, Forbidden # NotFound er viktig for objekter som forsvinner
+from google.cloud.exceptions import NotFound, PreconditionFailed, Forbidden
 import functions_framework
 
 logging.basicConfig(level=logging.INFO)
@@ -19,30 +19,89 @@ MANAGED_BUCKET_LABEL_KEY = os.environ.get('MANAGED_BUCKET_LABEL_KEY', "autotagge
 MANAGED_BUCKET_LABEL_VALUE = os.environ.get('MANAGED_BUCKET_LABEL_VALUE', "true")
 LAST_SCANNED_LABEL_KEY_RECON = os.environ.get('LAST_SCANNED_LABEL_KEY_RECON', "autotagger-last-reconciled-utc") # Egen label for denne
 
-# For å generere path-baserte hasher for KONSISTENS, selv om de primært settes av batch_worker
+# To generate path-based hashes for CONSISTENCY, even though they are primarily set by batch_worker
 PATH_HASH_ALGORITHM_NAME_FOR_OBJECTS = os.environ.get('PATH_HASH_ALGORITHM', "PATH_BASED_SHA256")
 BUCKET_PATH_HASH_ALGORITHM_NAME = "BUCKET_PATH_SHA256"
 
 
-# --- Hjelpefunksjoner (gjenbrukt fra batch_worker) ---
+# --- Helper functions (reused from batch_worker) ---
+
 def _generate_sha256_hash(input_string: str) -> str:
+
+        """
+    Generate a SHA-256 hash from the given input string.
+
+    Args:
+        input_string (str): The input text to be hashed.
+
+    Returns:
+        str: The SHA-256 hash represented as a hexadecimal string.
+    """
+    
     hasher = hashlib.sha256()
     hasher.update(input_string.encode('utf-8'))
     return hasher.hexdigest()
 
 def _get_file_format(blob_name_with_path: str):
+        """
+    Extract the file extension (format) from a given blob or file path.
+
+    Args:
+        blob_name_with_path (str): The full path or name of the blob or file.
+
+    Returns:
+        str or None: The lowercase file extension including the dot (e.g., '.json'),
+                     or None if no extension is found or the input is empty.
+    """
+
     if not blob_name_with_path: return None
     file_name = pathlib.Path(blob_name_with_path).name
     suffix = pathlib.Path(file_name).suffix
     return suffix.lower() if suffix else None
 
 def _safe_getattr(obj, attr, default=None):
+        """
+    Safely retrieve an attribute from an object, returning a default value if the attribute is missing.
+
+    Args:
+        obj: The object to inspect.
+        attr (str): The name of the attribute to retrieve.
+        default: The value to return if the attribute does not exist. Defaults to None.
+
+    Returns:
+        Any: The value of the attribute if it exists, otherwise the default value.
+    """
     return getattr(obj, attr, default)
 
+
+
 def _safe_isoformat(dt_obj):
+        """
+    Safely convert a datetime object to an ISO 8601 formatted string.
+
+    Args:
+        dt_obj (datetime or None): The datetime object to format.
+
+    Returns:
+        str or None: The ISO 8601 formatted string if dt_obj is provided, otherwise None.
+    """
+    
     return dt_obj.isoformat() if dt_obj else None
 
 def _collect_gcp_resource_details_for_bucket(gcs_bucket_obj, actual_gcs_labels):
+
+        """
+    Collect metadata and configuration details from a Google Cloud Storage bucket object.
+
+    Args:
+        gcs_bucket_obj: The GCS bucket object from which metadata is extracted.
+        actual_gcs_labels (dict or None): Dictionary of GCS labels applied to the bucket.
+
+    Returns:
+        dict: A dictionary containing key metadata fields, including creation and update timestamps,
+              location, storage class, versioning status, encryption settings, IAM configuration, and labels.
+    """
+    
     iam_config = _safe_getattr(gcs_bucket_obj, 'iam_configuration')
     details = {
         "gcs_time_created_raw": str(_safe_getattr(gcs_bucket_obj, 'time_created')),
@@ -62,6 +121,19 @@ def _collect_gcp_resource_details_for_bucket(gcs_bucket_obj, actual_gcs_labels):
     return details
 
 def _collect_gcp_resource_details_for_object(gcs_blob_obj):
+
+        """
+    Extract metadata and configuration details from a GCS blob (object).
+
+    Args:
+        gcs_blob_obj: The Google Cloud Storage blob object to extract metadata from.
+
+    Returns:
+        dict: A dictionary containing object-level metadata including creation and update timestamps,
+              generation and metageneration, checksums (CRC32C and MD5), KMS key reference, hold settings,
+              retention expiration, and encryption algorithm if applicable.
+    """
+    
     cust_enc = _safe_getattr(gcs_blob_obj, 'customer_encryption')
     retention_exp_time = _safe_getattr(gcs_blob_obj, 'retention_expiration_time')
     details = {
@@ -79,7 +151,20 @@ def _collect_gcp_resource_details_for_object(gcs_blob_obj):
     }
     return details
 
-def _build_scalar_query_parameters(param_dict: dict) -> list: # Viktig for DML
+def _build_scalar_query_parameters(param_dict: dict) -> list: 
+        """
+    Construct a list of BigQuery ScalarQueryParameter objects from a dictionary of key-value pairs.
+
+    This function infers BigQuery-compatible types for each parameter based on the value's Python type
+    and key name conventions (e.g., keys ending in "_utc" are treated as TIMESTAMP, certain fields as JSON).
+    The output is suitable for use in parameterized DML and query jobs.
+
+    Args:
+        param_dict (dict): A dictionary where keys are parameter names and values are their corresponding values.
+
+    Returns:
+        list: A list of bigquery.ScalarQueryParameter objects with appropriate types.
+    """
     typed_params = []
     for key, value in param_dict.items():
         bq_type = "STRING"
@@ -96,11 +181,31 @@ def _build_scalar_query_parameters(param_dict: dict) -> list: # Viktig for DML
             elif key == "file_size_bytes": bq_type = "INT64"
         typed_params.append(bigquery.ScalarQueryParameter(key, bq_type, value))
     return typed_params
-# --- Slutt på hjelpefunksjoner ---
-
 
 @functions_framework.http
 def main_reconciliation_handler(request):
+
+    """
+    HTTP-triggered Cloud Function that performs a full reconciliation between GCS and BigQuery records.
+
+    This function performs three main operations:
+      1. **Bucket-level Reconciliation**: Updates metadata in BigQuery for managed GCS buckets
+         if discrepancies are found between GCS and BQ.
+      2. **Object Deletion Detection**: Identifies objects marked as 'ACTIVE' in BigQuery
+         but no longer present in GCS, and updates their status to 'DELETED'.
+      3. **Object Metadata Reconciliation**: Updates metadata for GCS objects in BigQuery
+         if changes are detected (e.g., timestamps, storage class, file format, content type).
+
+    The function assumes that all buckets are pre-inserted by a separate batch ingestion process.
+
+    Args:
+        request (flask.Request): The HTTP request triggering the function. The body is ignored.
+
+    Returns:
+        Tuple[str, int]: A message string and an HTTP status code.
+                         Returns 200 on successful reconciliation, or 500 on error.
+    """
+    
     run_dt_utc = datetime.now(timezone.utc)
     run_ts_iso = run_dt_utc.isoformat()
     run_ts_label = run_dt_utc.strftime("%Y%m%d%H%M%S")
@@ -134,7 +239,7 @@ def main_reconciliation_handler(request):
             logger.info(f"FullReconciliationWorker: Kjører full synkronisering for bucket: {bucket_name}")
             bucket_gcs_path = f"gs://{bucket_name}"
 
-            # --- 1. Oppdater BUCKET-raden i BQ hvis nødvendig ---
+            # --- 1. Update the BUCKET row in BQ if necessary ---
             query_bucket_bq = f"""
                 SELECT status, hash_algorithm, hash_value, gcp_resource_details,
                        time_created_utc, time_updated_utc, storage_class,
@@ -194,7 +299,7 @@ def main_reconciliation_handler(request):
                 logger.error(f"FullReconciliationWorker: Feil ved BQ bucket update for {bucket_name}: {e_bq_bucket_update}. Details: {error_details}", exc_info=True)
 
 
-            # --- 2. Marker slettede objekter i BQ ---
+            # --- 2. Mark deleted objects in BQ ---
             try:
                 gcs_obj_paths_set = {f"gs://{bucket_name}/{b.name}" for b in storage_client.list_blobs(bucket_name)}
                 
@@ -227,13 +332,15 @@ def main_reconciliation_handler(request):
                 logger.error(f"FullReconciliationWorker: Feil ved markering av slettede objekter for {bucket_name}: {e_recon_deleted}. Details: {error_details}", exc_info=True)
 
 
-            # --- 3. Oppdater individuelle OBJEKT-rader i BQ hvis nødvendig ---
+            # --- 3. Update individual OBJECT rows in BQ if necessary ---
+
             for blob in storage_client.list_blobs(bucket_name):
                 full_gcs_path = f"gs://{bucket_name}/{blob.name}"
                 try:
                     blob.reload() # Få ferskeste data fra GCS
                     
-                    # Hent eksisterende rad fra BQ
+                    # Retrieve existing row from BQ
+
                     query_bq_obj_select = f"""SELECT gcs_path, status, hash_value, hash_algorithm, file_format,
                                                    gcs_metadata, gcp_resource_details,
                                                    file_size_bytes, content_type, time_created_utc, time_updated_utc, storage_class,
@@ -256,8 +363,9 @@ def main_reconciliation_handler(request):
                     gcs_object_details_dict = _collect_gcp_resource_details_for_object(blob)
                     file_format_for_bq = _get_file_format(full_gcs_path)
                     
-                    # GCS metadata her bør være det som er på objektet, da batch_worker har patchet det
-                    # Vi stoler på at GCS har den "autoritative" metadataen som BQ skal reflektere
+                    # GCS metadata here should reflect what's on the object, as batch_worker has patched it
+                    # We rely on GCS having the "authoritative" metadata that BQ should reflect
+
                     current_gcs_metadata = blob.metadata 
 
                     data_from_gcs_for_obj_update = {
@@ -311,7 +419,8 @@ def main_reconciliation_handler(request):
                     error_details = getattr(e_bq_obj_update, 'errors', None)
                     logger.error(f"FullReconciliationWorker: Feil ved BQ object update for {full_gcs_path}: {e_bq_obj_update}. Details: {error_details}", exc_info=True)
 
-            # Oppdater GCS bucket label for denne synkroniseringen
+           # Update GCS bucket label for this synchronization
+
             try:
                 if bucket_gcs_obj.labels is None: bucket_gcs_obj.labels = {}
                 bucket_gcs_obj.labels[LAST_SCANNED_LABEL_KEY_RECON] = run_ts_label
